@@ -1,14 +1,15 @@
 """
 ══════════════════════════════════════════════════════════════════
- OMAH SABUN — WhatsApp Bot CS + Order + Marketing
- PT Naraya Jagad Sejahtera
- Fase 4 — powered by Fonnte + Google Sheets + Gemini AI
+OMAH SABUN — WhatsApp Bot CS + Order + Marketing
+PT Naraya Jagad Sejahtera
+Fase 4 — powered by Fonnte + Google Sheets + Gemini AI
 
- FITUR:
- 1. Bot CS Otomatis (menu interaktif + AI Gemini)
- 2. Order via WhatsApp → simpan ke Google Sheets
- 3. Blast Marketing ke list pelanggan
- 4. Notifikasi order baru ke nomor admin
+FITUR:
+1. Bot CS Otomatis (menu interaktif + AI Gemini)
+2. Order via WhatsApp → simpan ke Google Sheets
+3. Blast Marketing ke list pelanggan
+4. Notifikasi order baru ke nomor admin
+5. Panel Admin (keyword rahasia)
 ══════════════════════════════════════════════════════════════════
 """
 
@@ -26,15 +27,16 @@ FONNTE_TOKEN  = os.environ.get('FONNTE_TOKEN', '')
 WEBAPP_URL    = os.environ.get('WEBAPP_URL', '')
 WEBAPP_SECRET = os.environ.get('WEBAPP_SECRET', 'omahsabun_naraya_2024')
 GEMINI_KEY    = os.environ.get('GEMINI_API_KEY', '')
-ADMIN_WA      = os.environ.get('ADMIN_WA', '')        # format: 628xxx (tanpa +)
+ADMIN_WA      = os.environ.get('ADMIN_WA', '')          # format: 628xxx (tanpa +)
+ADMIN_SECRET  = os.environ.get('ADMIN_SECRET', 'admin dara')  # keyword panel admin
 
-NAMA_TOKO  = 'Omah Sabun'
-NAMA_PT    = 'PT Naraya Jagad Sejahtera'
-ALAMAT     = os.environ.get('ALAMAT_TOKO', 'Hubungi admin untuk info alamat lengkap')
-JAM_BUKA   = os.environ.get('JAM_BUKA', 'Senin - Sabtu: 08.00 - 17.00 WIB')
-KOTA       = os.environ.get('KOTA', 'Yogyakarta')
+NAMA_TOKO = 'Omah Sabun'
+NAMA_PT   = 'PT Naraya Jagad Sejahtera'
+ALAMAT    = os.environ.get('ALAMAT_TOKO', 'Hubungi admin untuk info alamat lengkap')
+JAM_BUKA  = os.environ.get('JAM_BUKA',   'Senin - Sabtu: 08.00 - 17.00 WIB')
+KOTA      = os.environ.get('KOTA',       'Yogyakarta')
 
-SESSION_TIMEOUT = 1800   # 30 menit tanpa aktivitas → reset sesi
+SESSION_TIMEOUT = 1800  # 30 menit tanpa aktivitas → reset sesi
 
 # ─── INIT ─────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -52,8 +54,8 @@ else:
 
 # ─── STATE MANAGEMENT ─────────────────────────────────────────────
 # user_sessions[nomor_wa] = { state, data, last_activity }
-user_sessions = {}
-sessions_lock = threading.Lock()
+user_sessions  = {}
+sessions_lock  = threading.Lock()
 
 def get_session(sender):
     """Ambil atau buat sesi user. Auto-reset jika sudah timeout."""
@@ -78,7 +80,7 @@ def set_state(sender, state, extra_data=None):
 
 def clear_session_data(sender):
     sess = get_session(sender)
-    sess['data'] = {}
+    sess['data']  = {}
     sess['state'] = 'menu'
 
 # ─── FONNTE API ───────────────────────────────────────────────────
@@ -89,8 +91,8 @@ def send_wa(target, message):
             'https://api.fonnte.com/send',
             headers={'Authorization': FONNTE_TOKEN},
             data={
-                'target': target,
-                'message': message,
+                'target':      target,
+                'message':     message,
                 'countryCode': '62'
             },
             timeout=20
@@ -132,22 +134,49 @@ def api_post(payload):
         log.error(f'api_post [{payload.get("action")}] error: {e}')
         return None
 
+# ─── PRODUK FALLBACK (hardcoded — dipakai jika Google Sheets API gagal) ────
+PRODUK_FALLBACK = [
+    {'id': 'P001', 'nama': 'DARA Sabun Cuci Piring',      'kategori': 'Sabun Cuci',       'harga_per_ml': 8},
+    {'id': 'P002', 'nama': 'DARA Sabun Cuci Baju',         'kategori': 'Sabun Cuci',       'harga_per_ml': 7},
+    {'id': 'P003', 'nama': 'DARA Sabun Cuci Buah & Sayur', 'kategori': 'Sabun Cuci',       'harga_per_ml': 11},
+    {'id': 'P004', 'nama': 'DARA Sabun Lantai',            'kategori': 'Pembersih Rumah',  'harga_per_ml': 6},
+    {'id': 'P005', 'nama': 'DARA Pembersih Dapur',         'kategori': 'Pembersih Rumah',  'harga_per_ml': 9},
+    {'id': 'P006', 'nama': 'DARA Pembersih Toilet',        'kategori': 'Pembersih Rumah',  'harga_per_ml': 10},
+    {'id': 'P007', 'nama': 'DARA Sabun Mandi',             'kategori': 'Perawatan Diri',   'harga_per_ml': 10},
+    {'id': 'P008', 'nama': 'DARA Hand Soap / Sabun Tangan','kategori': 'Perawatan Diri',   'harga_per_ml': 12},
+]
+
 # ─── PRODUK CACHE ─────────────────────────────────────────────────
 _produk_cache      = None
 _produk_cache_time = None
-CACHE_TTL = 300  # 5 menit
+CACHE_TTL          = 300  # 5 menit
 
 def get_produk():
+    """Ambil daftar produk dari Google Sheets. Jika gagal, pakai PRODUK_FALLBACK."""
     global _produk_cache, _produk_cache_time
     now = datetime.now()
+
+    # Gunakan cache jika masih segar
     if _produk_cache and _produk_cache_time:
         if (now - _produk_cache_time).seconds < CACHE_TTL:
             return _produk_cache
-    data = api_get('get_produk')
-    if data and data.get('status') == 'ok':
-        _produk_cache      = data.get('produk', [])
-        _produk_cache_time = now
-    return _produk_cache or []
+
+    # Coba ambil dari API
+    try:
+        data = api_get('get_produk')
+        if data and data.get('status') == 'ok':
+            produk = data.get('produk', [])
+            if produk:
+                _produk_cache      = produk
+                _produk_cache_time = now
+                log.info(f'Produk dari API: {len(produk)} item')
+                return _produk_cache
+    except Exception as e:
+        log.error(f'get_produk API error: {e}')
+
+    # Fallback ke data hardcoded
+    log.warning('get_produk: API gagal/kosong → pakai PRODUK_FALLBACK')
+    return PRODUK_FALLBACK
 
 # ─── FORMAT PESAN ─────────────────────────────────────────────────
 def fmt_rp(angka):
@@ -164,12 +193,12 @@ def pesan_menu_utama(nama=''):
         f'Selamat datang di *{NAMA_TOKO}* 🧼\n'
         f'_{NAMA_PT}_\n\n'
         f'Pilih menu:\n\n'
-        f'1️⃣  Lihat Produk & Harga\n'
-        f'2️⃣  Order Sekarang\n'
-        f'3️⃣  Info Toko & Lokasi\n'
-        f'4️⃣  Cara Order\n'
-        f'5️⃣  Tanya CS (AI)\n'
-        f'6️⃣  Hubungi Admin Langsung\n\n'
+        f'1️⃣ Lihat Produk & Harga\n'
+        f'2️⃣ Order Sekarang\n'
+        f'3️⃣ Info Toko & Lokasi\n'
+        f'4️⃣ Cara Order\n'
+        f'5️⃣ Tanya CS (AI)\n'
+        f'6️⃣ Hubungi Admin Langsung\n\n'
         f'Ketik *angka* untuk memilih menu 😊\n'
         f'_(Ketik *0* kapan saja untuk kembali ke menu ini)_'
     )
@@ -197,8 +226,8 @@ def pesan_daftar_produk(produk_list):
             h_500  = int(h_ml * 500)
             h_1000 = int(h_ml * 1000)
             msg += f'  {no}. {p["nama"]}\n'
-            msg += f'      💰 {fmt_rp(h_ml)}/ml\n'
-            msg += f'      500ml={fmt_rp(h_500)} | 1L={fmt_rp(h_1000)}\n'
+            msg += f'     💰 {fmt_rp(h_ml)}/ml\n'
+            msg += f'     500ml={fmt_rp(h_500)} | 1L={fmt_rp(h_1000)}\n'
             nomor_to_produk[str(no)] = p
             no += 1
         msg += '\n'
@@ -242,6 +271,105 @@ def pesan_cara_order():
         f'Ketik *0* untuk kembali ke menu'
     )
 
+# ─── ADMIN PANEL ──────────────────────────────────────────────────
+def pesan_admin_panel():
+    """Tampilkan panel admin."""
+    now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
+    # Coba ambil statistik dari Google Sheets
+    stats_msg = ''
+    try:
+        data = api_get('get_stats')
+        if data and data.get('status') == 'ok':
+            total_order  = data.get('total_order', 0)
+            order_baru   = data.get('order_baru', 0)
+            total_omzet  = data.get('total_omzet', 0)
+            stats_msg = (
+                f'📊 *STATISTIK*\n'
+                f'• Total Order  : {total_order}\n'
+                f'• Order Baru   : {order_baru}\n'
+                f'• Estimasi Omzet: {fmt_rp(total_omzet)}\n\n'
+            )
+    except Exception:
+        pass
+
+    msg  = f'🔐 *PANEL ADMIN — {NAMA_TOKO}*\n'
+    msg += f'━━━━━━━━━━━━━━━━━━━━\n'
+    msg += f'🕐 {now_str}\n\n'
+    msg += stats_msg
+    msg += (
+        f'⚙️ *PERINTAH ADMIN:*\n\n'
+        f'📦 Lihat produk:\nKetik *1* dari menu utama\n\n'
+        f'📋 Lihat order terbaru:\nKetik */order*\n\n'
+        f'📢 Blast ke pelanggan:\nKetik */blast [pesan]*\n\n'
+        f'🔄 Reload cache produk:\nKetik */reload*\n\n'
+        f'📱 Total sesi aktif: {len(user_sessions)}\n\n'
+        f'━━━━━━━━━━━━━━━━━━━━\n'
+        f'Ketik *0* untuk kembali ke menu utama'
+    )
+    return msg
+
+def handle_admin_command(sender, text_raw):
+    """Tangani perintah admin (diawali /)."""
+    cmd_lower = text_raw.lower().strip()
+
+    if cmd_lower == '/reload':
+        global _produk_cache, _produk_cache_time
+        _produk_cache      = None
+        _produk_cache_time = None
+        send_wa(sender, '✅ Cache produk direset. Data akan dimuat ulang dari API.\n\nKetik *0* untuk menu.')
+        return True
+
+    if cmd_lower == '/order':
+        try:
+            data = api_get('get_orders_recent')
+            if data and data.get('status') == 'ok':
+                orders = data.get('orders', [])
+                if orders:
+                    msg = '📋 *ORDER TERBARU*\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                    for o in orders[:10]:
+                        msg += (
+                            f'📌 No: {o.get("no_order","?")}\n'
+                            f'👤 {o.get("nama","?")} | {o.get("no_wa","?")}\n'
+                            f'🧴 {o.get("produk","?")}\n'
+                            f'💰 {fmt_rp(o.get("total_estimasi",0))}\n'
+                            f'📅 {o.get("tanggal","?")}\n\n'
+                        )
+                    send_wa(sender, msg + 'Ketik *0* untuk menu.')
+                else:
+                    send_wa(sender, '📋 Belum ada order.\n\nKetik *0* untuk menu.')
+            else:
+                send_wa(sender, '⚠️ Tidak bisa mengambil data order saat ini.\n\nKetik *0* untuk menu.')
+        except Exception as e:
+            send_wa(sender, f'❌ Error: {e}\n\nKetik *0* untuk menu.')
+        return True
+
+    if cmd_lower.startswith('/blast '):
+        pesan_blast = text_raw[7:].strip()
+        if not pesan_blast:
+            send_wa(sender, '❌ Format: */blast [isi pesan]*')
+            return True
+        try:
+            result = api_get('get_pelanggan_wa')
+            if result and result.get('status') == 'ok':
+                nomor_list = result.get('nomor_list', [])
+                if nomor_list:
+                    send_wa(sender, f'📢 Memulai blast ke *{len(nomor_list)}* nomor...')
+                    berhasil = 0
+                    for nomor in nomor_list:
+                        r = send_wa(format_nomor(str(nomor)), pesan_blast)
+                        if r:
+                            berhasil += 1
+                    send_wa(sender, f'✅ Blast selesai: *{berhasil}/{len(nomor_list)}* berhasil.\n\nKetik *0* untuk menu.')
+                else:
+                    send_wa(sender, '⚠️ Tidak ada nomor pelanggan di Sheets.\n\nKetik *0* untuk menu.')
+            else:
+                send_wa(sender, '⚠️ Gagal ambil data pelanggan dari Sheets.\n\nKetik *0* untuk menu.')
+        except Exception as e:
+            send_wa(sender, f'❌ Blast error: {e}\n\nKetik *0* untuk menu.')
+        return True
+
+    return False  # bukan perintah admin yang dikenal
+
 # ─── ORDER FLOW ───────────────────────────────────────────────────
 def mulai_order(sender, session):
     produk_list = get_produk()
@@ -250,9 +378,9 @@ def mulai_order(sender, session):
         return
 
     msg, nomor_map = pesan_daftar_produk(produk_list)
-    session['data']['produk_map']  = nomor_map
-    session['data']['cart']        = []
-    session['state'] = 'order_pilih_produk'
+    session['data']['produk_map'] = nomor_map
+    session['data']['cart']       = []
+    session['state']              = 'order_pilih_produk'
     send_wa(sender, msg + '\n\n*Ketik nomor produk untuk memesan:*')
 
 def handle_order_pilih_produk(sender, session, text):
@@ -294,11 +422,11 @@ def handle_order_input_volume(sender, session, text):
     total  = int(h_ml * vol)
 
     session['data'].setdefault('cart', []).append({
-        'id':      p.get('id', ''),
-        'nama':    p['nama'],
-        'volume':  vol,
+        'id':       p.get('id', ''),
+        'nama':     p['nama'],
+        'volume':   vol,
         'harga_ml': h_ml,
-        'total':   total
+        'total':    total
     })
     session['state'] = 'order_lanjut_atau_checkout'
 
@@ -307,14 +435,13 @@ def handle_order_input_volume(sender, session, text):
         f'🧴 {p["nama"]} — {vol:,} ml\n'
         f'💰 Estimasi: {fmt_rp(total)}\n\n'
         f'Ingin tambah produk lagi?\n\n'
-        f'1️⃣  Ya, tambah produk lain\n'
-        f'2️⃣  Lanjut ke pengiriman\n'
-        f'0️⃣  Batalkan order'
+        f'1️⃣ Ya, tambah produk lain\n'
+        f'2️⃣ Lanjut ke pengiriman\n'
+        f'0️⃣ Batalkan order'
     )
 
 def handle_order_lanjut_atau_checkout(sender, session, text):
     if text == '1':
-        # Kembali pilih produk
         produk_list = get_produk()
         msg, nomor_map = pesan_daftar_produk(produk_list)
         session['data']['produk_map'] = nomor_map
@@ -362,15 +489,14 @@ def handle_order_input_alamat(sender, session, text):
     msg += f'📱 No. WA: {sender}\n\n'
     msg += '━━━━━━━━━━━━━━━━━━━━\n'
     msg += 'Konfirmasi order?\n\n'
-    msg += '1️⃣  *Ya, konfirmasi*\n'
-    msg += '2️⃣  Ubah pesanan\n'
-    msg += '0️⃣  Batalkan'
+    msg += '1️⃣ *Ya, konfirmasi*\n'
+    msg += '2️⃣ Ubah pesanan\n'
+    msg += '0️⃣ Batalkan'
 
     send_wa(sender, msg)
 
 def handle_order_konfirmasi(sender, session, text):
     if text == '2':
-        # Reset cart, mulai ulang dari pilih produk
         session['data']['cart'] = []
         mulai_order(sender, session)
         return
@@ -379,11 +505,10 @@ def handle_order_konfirmasi(sender, session, text):
         send_wa(sender, 'Ketik *1* untuk konfirmasi, *2* untuk ubah, atau *0* untuk batal.')
         return
 
-    # Simpan order ke Google Sheets
-    cart  = session['data'].get('cart', [])
-    nama  = session['data'].get('nama_pelanggan', '')
-    alamat = session['data'].get('alamat', '')
-    total = sum(i['total'] for i in cart)
+    cart      = session['data'].get('cart', [])
+    nama      = session['data'].get('nama_pelanggan', '')
+    alamat    = session['data'].get('alamat', '')
+    total     = sum(i['total'] for i in cart)
     produk_str = '; '.join([f'{i["nama"]} {i["volume"]:,}ml' for i in cart])
 
     send_wa(sender, '⏳ Sedang memproses order Anda...')
@@ -411,10 +536,9 @@ def handle_order_konfirmasi(sender, session, text):
             f'Terima kasih telah berbelanja di *{NAMA_TOKO}* 🧼❤️\n\n'
             f'Ketik *0* untuk kembali ke menu'
         )
-        # Notif ke admin
         if ADMIN_WA:
             send_wa(ADMIN_WA,
-                f'🔔 *ORDER BARU WIA!*\n\n'
+                f'🔔 *ORDER BARU WA!*\n\n'
                 f'📋 No: *{no_order}*\n'
                 f'👤 {nama}\n'
                 f'📱 {sender}\n'
@@ -433,6 +557,9 @@ def handle_order_konfirmasi(sender, session, text):
 
 # ─── AI CS ────────────────────────────────────────────────────────
 def handle_ai_cs(sender, text):
+    # Pastikan session tetap di state ai_cs selama percakapan ini
+    set_state(sender, 'ai_cs')
+
     if not ai_model:
         send_wa(sender,
             '⚠️ Maaf, layanan AI sedang tidak aktif.\n'
@@ -442,8 +569,8 @@ def handle_ai_cs(sender, text):
         return
 
     try:
-        produk_list = get_produk()
-        produk_info = '\n'.join([
+        produk_list  = get_produk()
+        produk_info  = '\n'.join([
             f'- {p["nama"]} (Kat: {p.get("kategori","")}) harga {fmt_rp(p.get("harga_per_ml",0))}/ml'
             for p in produk_list
         ]) if produk_list else 'Data produk tidak tersedia'
@@ -466,20 +593,28 @@ def handle_ai_cs(sender, text):
         )
 
         response = ai_model.generate_content(prompt)
-        send_wa(sender, response.text.strip())
+        reply    = response.text.strip() if response.text else ''
+
+        if not reply:
+            raise ValueError('Gemini mengembalikan respons kosong')
+
+        send_wa(sender, reply)
 
     except Exception as e:
         log.error(f'AI CS error: {e}')
+        # Session tetap di ai_cs agar user bisa coba lagi
         send_wa(sender,
-            'Maaf, CS AI sedang sibuk. 😅\n'
-            'Silakan hubungi admin langsung (ketik *6*).\n\n'
-            'Ketik *0* untuk menu'
+            '😅 Maaf, saya sedang kesulitan menjawab.\n'
+            'Coba tanyakan lagi, atau ketik *6* untuk bicara langsung dengan admin.\n\n'
+            '_(Ketik *0* untuk menu utama)_'
         )
 
 # ─── MAIN HANDLER ─────────────────────────────────────────────────
-KEYWORD_RESET = {'0', 'menu', 'mulai', 'start', 'halo', 'hai', 'hi', 'hello',
-                 'helo', 'assalamualaikum', 'permisi', 'selamat pagi',
-                 'selamat siang', 'selamat sore', 'selamat malam'}
+KEYWORD_RESET = {
+    '0', 'menu', 'mulai', 'start', 'halo', 'hai', 'hi', 'hello',
+    'helo', 'assalamualaikum', 'permisi', 'selamat pagi',
+    'selamat siang', 'selamat sore', 'selamat malam'
+}
 
 def handle_message(sender, text, pushname=''):
     text_raw   = text.strip()
@@ -487,20 +622,33 @@ def handle_message(sender, text, pushname=''):
 
     log.info(f'MSG from {sender} [{pushname}]: {text_raw[:80]}')
 
+    # ── Admin panel (keyword rahasia) ──
+    if text_lower == ADMIN_SECRET.lower():
+        # Siapapun yang tahu keyword bisa akses, tapi idealnya hanya admin
+        set_state(sender, 'admin')
+        send_wa(sender, pesan_admin_panel())
+        return
+
+    # ── Perintah admin (diawali /) ──
+    session = get_session(sender)
+    if text_raw.startswith('/') and session.get('state') == 'admin':
+        handled = handle_admin_command(sender, text_raw)
+        if handled:
+            return
+
     # ── Global reset keywords ──
     if text_lower in KEYWORD_RESET or text_raw == '0':
         set_state(sender, 'menu')
         send_wa(sender, pesan_menu_utama(pushname))
         return
 
-    session = get_session(sender)
-    state   = session['state']
+    state = session['state']
 
     # ── start / menu ──
     if state in ('start', 'menu'):
         if text_raw == '1':
             produk_list = get_produk()
-            msg, _ = pesan_daftar_produk(produk_list)
+            msg, _      = pesan_daftar_produk(produk_list)
             set_state(sender, 'browse_produk')
             send_wa(sender, msg)
         elif text_raw == '2':
@@ -525,7 +673,6 @@ def handle_message(sender, text, pushname=''):
                 f'Ketik *0* untuk menu'
             )
         else:
-            # Pesan pertama dari customer baru → tampilkan menu
             set_state(sender, 'menu')
             send_wa(sender, pesan_menu_utama(pushname))
         return
@@ -564,10 +711,17 @@ def handle_message(sender, text, pushname=''):
         handle_ai_cs(sender, text_raw)
         return
 
+    # ── Admin state — perintah / ──
+    if state == 'admin':
+        if text_raw.startswith('/'):
+            handle_admin_command(sender, text_raw)
+        else:
+            send_wa(sender, pesan_admin_panel())
+        return
+
     # Default fallback
     set_state(sender, 'menu')
     send_wa(sender, pesan_menu_utama(pushname))
-
 
 # ─── FLASK ROUTES ─────────────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
@@ -582,7 +736,6 @@ def webhook():
         pushname = data.get('pushname') or data.get('name') or ''
         isgroup  = data.get('isgroup', False)
 
-        # Abaikan pesan dari group
         if isgroup:
             return jsonify({'status': 'ok', 'note': 'group skipped'})
 
@@ -617,14 +770,13 @@ def blast():
         if secret != WEBAPP_SECRET:
             return jsonify({'status': 'error', 'msg': 'Unauthorized'}), 403
 
-        pesan       = data.get('pesan', '').strip()
-        nomor_list  = data.get('nomor_list', [])
+        pesan      = data.get('pesan', '').strip()
+        nomor_list = data.get('nomor_list', [])
         dari_sheets = data.get('ambil_dari_sheets', False)
 
         if not pesan:
             return jsonify({'status': 'error', 'msg': 'Field "pesan" wajib diisi'})
 
-        # Ambil list nomor dari Google Sheets jika diminta
         if dari_sheets:
             result = api_get('get_pelanggan_wa')
             if result and result.get('status') == 'ok':
@@ -655,7 +807,7 @@ def blast():
             'berhasil': berhasil,
             'gagal':    gagal,
             'total':    len(nomor_list),
-            'errors':   errors[:10]  # maks 10 error ditampilkan
+            'errors':   errors[:10]
         })
 
     except Exception as e:

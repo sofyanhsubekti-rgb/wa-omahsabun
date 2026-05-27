@@ -51,7 +51,7 @@ if GEMINI_KEY:
     try:
         genai.configure(api_key=GEMINI_KEY)
         # Coba model terbaru dulu, fallback ke versi lama
-        for _model_name in ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro', 'gemini-1.0-pro']:
+        for _model_name in ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-1.0-pro']:
             try:
                 ai_model = genai.GenerativeModel(_model_name)
                 # Test quick

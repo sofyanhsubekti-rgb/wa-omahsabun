@@ -46,11 +46,24 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+ai_model = None
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-    ai_model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    ai_model = None
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+        # Coba model terbaru dulu, fallback ke versi lama
+        for _model_name in ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro', 'gemini-1.0-pro']:
+            try:
+                ai_model = genai.GenerativeModel(_model_name)
+                # Test quick
+                _test = ai_model.generate_content('hi')
+                log.info(f'Gemini model aktif: {_model_name}')
+                break
+            except Exception as _e:
+                log.warning(f'Model {_model_name} gagal: {_e}')
+                ai_model = None
+    except Exception as _e:
+        log.error(f'Gemini init error: {_e}')
+        ai_model = None
 
 # ─── STATE MANAGEMENT ─────────────────────────────────────────────
 # user_sessions[nomor_wa] = { state, data, last_activity }
@@ -197,8 +210,7 @@ def pesan_menu_utama(nama=''):
         f'2️⃣ Order Sekarang\n'
         f'3️⃣ Info Toko & Lokasi\n'
         f'4️⃣ Cara Order\n'
-        f'5️⃣ Tanya CS (AI)\n'
-        f'6️⃣ Hubungi Admin Langsung\n\n'
+        f'5️⃣ Tanya CS\n\n'
         f'Ketik *angka* untuk memilih menu 😊\n'
         f'_(Ketik *0* kapan saja untuk kembali ke menu ini)_'
     )
@@ -556,58 +568,152 @@ def handle_order_konfirmasi(sender, session, text):
     clear_session_data(sender)
 
 # ─── AI CS ────────────────────────────────────────────────────────
-def handle_ai_cs(sender, text):
-    # Pastikan session tetap di state ai_cs selama percakapan ini
-    set_state(sender, 'ai_cs')
+def _rule_based_cs(text):
+    """Jawaban rule-based untuk pertanyaan umum. Return None jika tidak cocok."""
+    q = text.lower()
+    produk_list = get_produk()
 
-    if not ai_model:
-        send_wa(sender,
-            '⚠️ Maaf, layanan AI sedang tidak aktif.\n'
-            'Silakan hubungi admin langsung (ketik *6* di menu).\n\n'
-            'Ketik *0* untuk menu'
-        )
-        return
-
-    try:
-        produk_list  = get_produk()
-        produk_info  = '\n'.join([
-            f'- {p["nama"]} (Kat: {p.get("kategori","")}) harga {fmt_rp(p.get("harga_per_ml",0))}/ml'
-            for p in produk_list
-        ]) if produk_list else 'Data produk tidak tersedia'
-
-        prompt = (
-            f'Kamu adalah CS (Customer Service) toko sabun rumah tangga bernama "{NAMA_TOKO}" '
-            f'dari {NAMA_PT}.\n\n'
-            f'Info toko:\n'
-            f'- Alamat: {ALAMAT}\n'
-            f'- Jam buka: {JAM_BUKA}\n'
-            f'- Kota: {KOTA}\n\n'
-            f'Daftar produk:\n{produk_info}\n\n'
-            f'Pesan dari customer: "{text}"\n\n'
-            f'Instruksi:\n'
-            f'- Jawab dengan ramah, singkat (maksimal 4 kalimat)\n'
-            f'- Gunakan Bahasa Indonesia yang santai\n'
-            f'- Jika pertanyaan tentang harga, berikan estimasi dari data di atas\n'
-            f'- Jika tidak bisa menjawab, arahkan ke admin\n'
-            f'- Akhiri jawaban dengan: "Ketik *0* untuk menu utama 😊"'
+    if any(w in q for w in ['diantar', 'kirim', 'delivery', 'ongkir', 'antar', 'ekspedisi', 'cod']):
+        return (
+            f'Bisa banget kak! \U0001f69a\n\n'
+            f'Untuk area {KOTA} bisa antar langsung atau COD. '
+            f'Kalau di luar kota bisa via ekspedisi ya kak. Ongkir menyesuaikan jarak \U0001f60a\n\n'
+            f'Mau langsung order? Ketik *2* ya!\n_(Ketik *0* untuk menu utama)_'
         )
 
-        response = ai_model.generate_content(prompt)
-        reply    = response.text.strip() if response.text else ''
+    if any(w in q for w in ['harga', 'berapa', 'price', 'murah', 'mahal', 'cost']):
+        if produk_list:
+            msg = 'Ini info harga produk DARA kita kak! \U0001f4b0\n\n'
+            for p in produk_list[:6]:
+                h = p.get('harga_per_ml', 0)
+                msg += f'• {p["nama"]}\n  {fmt_rp(h)}/ml | 500ml = {fmt_rp(int(h * 500))}\n\n'
+            msg += 'Harga bisa nego untuk order besar ya kak \U0001f60a\n'
+            msg += 'Ketik *2* untuk order, atau *0* untuk menu utama.'
+            return msg
 
-        if not reply:
-            raise ValueError('Gemini mengembalikan respons kosong')
+    if any(w in q for w in ['dimana', 'di mana', 'lokasi', 'alamat', 'toko', 'tempat', 'beli']):
+        return (
+            f'Toko kita ada di *{KOTA}* kak! \U0001f4cd\n\n'
+            f'\U0001f4cc {ALAMAT}\n'
+            f'\U0001f550 {JAM_BUKA}\n\n'
+            f'Bisa datang langsung atau order via bot ini. Admin kita siap bantu! \U0001f60a\n\n'
+            f'_(Ketik *0* untuk menu utama)_'
+        )
 
-        send_wa(sender, reply)
+    if any(w in q for w in ['jam', 'buka', 'tutup', 'operasional', 'hari apa']):
+        return (
+            f'Jam operasional kita kak:\n\n'
+            f'\U0001f550 *{JAM_BUKA}*\n\n'
+            f'Di luar jam itu bisa tetap order via bot ini 24 jam ya, '
+            f'nanti admin follow up saat jam kerja \U0001f60a\n\n'
+            f'_(Ketik *0* untuk menu utama)_'
+        )
 
-    except Exception as e:
-        log.error(f'AI CS error: {e}')
-        # Session tetap di ai_cs agar user bisa coba lagi
-        send_wa(sender,
-            '😅 Maaf, saya sedang kesulitan menjawab.\n'
-            'Coba tanyakan lagi, atau ketik *6* untuk bicara langsung dengan admin.\n\n'
+    if any(w in q for w in ['produk', 'sabun', 'katalog', 'ada apa', 'jual apa', 'tersedia']):
+        if produk_list:
+            msg = 'Ini produk DARA yang tersedia kak! \U0001f9f4\n\n'
+            for p in produk_list:
+                msg += f'• {p["nama"]}\n'
+            msg += '\nKetik *1* untuk lihat harga lengkap \U0001f60a\nKetik *2* untuk langsung order!\n_(Ketik *0* untuk menu utama)_'
+            return msg
+
+    if any(w in q for w in ['bayar', 'pembayaran', 'transfer', 'cash', 'tunai', 'bca', 'mandiri', 'dana', 'gopay', 'ovo']):
+        return (
+            'Untuk pembayaran kita terima kak:\n\n'
+            '\U0001f4b5 *Cash / Tunai*\n'
+            '\U0001f3e6 *Transfer Bank*\n'
+            '\U0001f4f1 *E-wallet (GoPay, OVO, Dana, dll)*\n\n'
+            'Setelah order, admin kita yang akan hubungi untuk konfirmasi pembayaran ya kak \U0001f60a\n\n'
             '_(Ketik *0* untuk menu utama)_'
         )
+
+    if any(w in q for w in ['minimum', 'minimal', 'min order', 'minimum order']):
+        return (
+            'Minimum order kita:\n\n'
+            '\U0001f4e6 *500 ml* per produk ya kak\n\n'
+            'Untuk order skala besar / grosir, harga lebih spesial — hubungi admin langsung ya! \U0001f60a\n\n'
+            'Ketik *2* untuk order sekarang!\n_(Ketik *0* untuk menu utama)_'
+        )
+
+    if any(w in q for w in ['aman', 'bpom', 'halal', 'bahan', 'kandungan', 'formula', 'komposisi']):
+        return (
+            'Produk DARA kita aman dipakai sehari-hari kak! ✅\n\n'
+            '\U0001f9ea Formula khusus — efektif membersihkan\n'
+            '\U0001f33f Ramah lingkungan\n'
+            '\U0001f3ed Diproduksi oleh PT Naraya Jagad Sejahtera\n\n'
+            'Ada pertanyaan lebih detail? Admin kita siap bantu! \U0001f60a\n\n'
+            '_(Ketik *0* untuk menu utama)_'
+        )
+
+    return None
+
+
+def handle_ai_cs(sender, text):
+    """CS humanis — persona Dara dari Omah Sabun. Gemini AI + rule-based fallback."""
+    set_state(sender, 'ai_cs')
+
+    # ── 1. Coba Gemini AI dulu ──
+    if ai_model:
+        try:
+            produk_list = get_produk()
+            produk_info = '\n'.join([
+                f'- {p["nama"]} ({p.get("kategori", "")}) Rp{p.get("harga_per_ml", 0)}/ml, '
+                f'500ml=Rp{int(p.get("harga_per_ml", 0) * 500)}'
+                for p in produk_list
+            ]) if produk_list else 'Belum ada data produk'
+
+            prompt = (
+                f'Kamu adalah Dara, CS dari toko sabun "{NAMA_TOKO}" milik {NAMA_PT} di {KOTA}.\n\n'
+                f'Karakter Dara:\n'
+                f'- Ramah, hangat, dan asik diajak ngobrol seperti teman\n'
+                f'- Bahasa santai ala anak muda Indonesia (pakai "kak", "nih", "yuk", "dong")\n'
+                f'- Pakai emoji secukupnya, tidak berlebihan\n'
+                f'- Jawaban singkat dan to the point (maksimal 5 kalimat)\n'
+                f'- Jujur — kalau tidak tahu, bilang tidak tahu dengan sopan\n'
+                f'- Tidak kaku, tidak seperti robot\n\n'
+                f'Info toko:\n'
+                f'- Alamat: {ALAMAT}\n'
+                f'- Jam buka: {JAM_BUKA}\n'
+                f'- Kota: {KOTA}\n'
+                f'- Pengiriman: area {KOTA} bisa antar/COD, luar kota via ekspedisi\n'
+                f'- Pembayaran: cash, transfer bank, e-wallet\n'
+                f'- Minimum order: 500 ml per produk\n\n'
+                f'Daftar produk:\n{produk_info}\n\n'
+                f'Pertanyaan customer: "{text}"\n\n'
+                f'Instruksi tambahan:\n'
+                f'- Jawab pertanyaan di atas sebagai Dara\n'
+                f'- Kalau ada yang mau order, arahkan ke menu *2*\n'
+                f'- Akhiri dengan ajakan/pertanyaan balik agar percakapan hidup\n'
+                f'- Di akhir SELALU tambahkan: "_(Ketik *0* untuk menu utama)_"'
+            )
+
+            generation_config = genai.types.GenerationConfig(temperature=0.85, max_output_tokens=400)
+            response = ai_model.generate_content(prompt, generation_config=generation_config)
+            reply = response.text.strip() if (response and response.text) else ''
+
+            if reply:
+                send_wa(sender, reply)
+                return
+
+        except Exception as e:
+            log.error(f'Gemini error untuk {sender}: {e}')
+
+    # ── 2. Fallback: rule-based ──
+    rule_reply = _rule_based_cs(text)
+    if rule_reply:
+        send_wa(sender, rule_reply)
+        return
+
+    # ── 3. Fallback terakhir ──
+    send_wa(sender,
+        'Hai kak! \U0001f60a Dara di sini siap bantu.\n\n'
+        'Dara kurang ngerti maksud pertanyaannya nih, bisa dijelasin lebih detail?\n\n'
+        '\U0001f6d2 *Harga & produk* — ketik "harga"\n'
+        '\U0001f69a *Pengiriman* — ketik "diantar"\n'
+        '\U0001f4cd *Lokasi toko* — ketik "dimana"\n'
+        '\U0001f4b3 *Cara bayar* — ketik "bayar"\n\n'
+        'Atau ketik *2* untuk langsung order ya! \U0001f60a\n_(Ketik *0* untuk menu utama)_'
+    )
 
 # ─── MAIN HANDLER ─────────────────────────────────────────────────
 KEYWORD_RESET = {
@@ -660,17 +766,10 @@ def handle_message(sender, text, pushname=''):
         elif text_raw == '5':
             set_state(sender, 'ai_cs')
             send_wa(sender,
-                '🤖 *Mode Tanya CS*\n\n'
-                'Silakan ketik pertanyaan Anda — saya siap membantu!\n\n'
+                '\U0001f9f4 *Tanya CS Omah Sabun*\n\n'
+                'Halo kak! Dara di sini siap bantu \U0001f60a\n\n'
+                'Silakan tanyakan apa saja — soal produk, harga, pengiriman, atau info toko.\n\n'
                 '_(Ketik *0* untuk kembali ke menu)_'
-            )
-        elif text_raw == '6':
-            wa_admin = ADMIN_WA or 'belum tersedia'
-            send_wa(sender,
-                f'📱 *Hubungi Admin Omah Sabun:*\n\n'
-                f'WhatsApp: wa.me/{wa_admin}\n\n'
-                f'Jam operasional:\n{JAM_BUKA}\n\n'
-                f'Ketik *0* untuk menu'
             )
         else:
             set_state(sender, 'menu')

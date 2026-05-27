@@ -32,7 +32,7 @@ ADMIN_SECRET  = os.environ.get('ADMIN_SECRET', 'admin dara')  # keyword panel ad
 
 NAMA_TOKO = 'Omah Sabun'
 NAMA_PT   = 'PT Naraya Jagad Sejahtera'
-ALAMAT    = os.environ.get('ALAMAT_TOKO', 'Hubungi admin untuk info alamat lengkap')
+ALAMAT    = os.environ.get('ALAMAT_TOKO', 'Jalan Raya Kutasari-Tobong (Komplek Pasar Kutasari), Purbalingga')
 JAM_BUKA  = os.environ.get('JAM_BUKA',   'Senin - Sabtu: 08.00 - 17.00 WIB')
 KOTA      = os.environ.get('KOTA',       'Purbalingga')
 

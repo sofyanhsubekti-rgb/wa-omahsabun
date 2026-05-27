@@ -16,6 +16,7 @@ FITUR:
 import os
 import json
 import logging
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -67,36 +68,95 @@ if GEMINI_KEY:
         log.error(f'Gemini init error: {_e}')
         ai_model = None
 
-# ─── STATE MANAGEMENT ─────────────────────────────────────────────
-# user_sessions[nomor_wa] = { state, data, last_activity }
-user_sessions  = {}
-sessions_lock  = threading.Lock()
+# ─── SESSION MANAGEMENT (SQLite persistent) ───────────────────────
+SESSION_DB   = os.environ.get('SESSION_DB_PATH', '/tmp/omahsabun_sessions.db')
+sessions_lock = threading.Lock()
+
+def _db_connect():
+    conn = sqlite3.connect(SESSION_DB, check_same_thread=False)
+    conn.execute('''CREATE TABLE IF NOT EXISTS sessions (
+        sender       TEXT PRIMARY KEY,
+        state        TEXT NOT NULL DEFAULT 'start',
+        data         TEXT NOT NULL DEFAULT '{}',
+        last_activity TEXT NOT NULL
+    )''')
+    conn.commit()
+    return conn
+
+# Inisialisasi DB saat startup
+try:
+    _init_conn = _db_connect()
+    _init_conn.close()
+    log.info(f'Session DB siap: {SESSION_DB}')
+except Exception as _e:
+    log.error(f'Session DB init gagal: {_e}')
 
 def get_session(sender):
-    """Ambil atau buat sesi user. Auto-reset jika sudah timeout."""
+    """Ambil atau buat sesi user dari SQLite. Auto-reset jika timeout."""
     now = datetime.now()
     with sessions_lock:
-        sess = user_sessions.get(sender)
-        if sess is None or (now - sess['last_activity']).seconds > SESSION_TIMEOUT:
-            user_sessions[sender] = {
-                'state': 'start',
-                'data': {},
-                'last_activity': now
-            }
-        else:
-            user_sessions[sender]['last_activity'] = now
-        return user_sessions[sender]
+        try:
+            conn = _db_connect()
+            row  = conn.execute(
+                'SELECT state, data, last_activity FROM sessions WHERE sender=?', (sender,)
+            ).fetchone()
+
+            if row:
+                last_act = datetime.fromisoformat(row[2])
+                elapsed  = (now - last_act).total_seconds()
+                if elapsed <= SESSION_TIMEOUT:
+                    # Sesi masih valid — update last_activity
+                    sess = {
+                        'state':         row[0],
+                        'data':          json.loads(row[1]),
+                        'last_activity': now
+                    }
+                    conn.execute(
+                        'UPDATE sessions SET last_activity=? WHERE sender=?',
+                        (now.isoformat(), sender)
+                    )
+                    conn.commit()
+                    conn.close()
+                    return sess
+            # Buat sesi baru
+            sess = {'state': 'start', 'data': {}, 'last_activity': now}
+            conn.execute(
+                'INSERT OR REPLACE INTO sessions (sender, state, data, last_activity) VALUES (?,?,?,?)',
+                (sender, 'start', '{}', now.isoformat())
+            )
+            conn.commit()
+            conn.close()
+            return sess
+        except Exception as e:
+            log.error(f'get_session DB error: {e}')
+            return {'state': 'start', 'data': {}, 'last_activity': now}
+
+def save_session(sender, sess):
+    """Simpan perubahan sesi ke SQLite."""
+    try:
+        with sessions_lock:
+            conn = _db_connect()
+            conn.execute(
+                'INSERT OR REPLACE INTO sessions (sender, state, data, last_activity) VALUES (?,?,?,?)',
+                (sender, sess['state'], json.dumps(sess['data']), sess['last_activity'].isoformat())
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        log.error(f'save_session DB error: {e}')
 
 def set_state(sender, state, extra_data=None):
     sess = get_session(sender)
     sess['state'] = state
     if extra_data:
         sess['data'].update(extra_data)
+    save_session(sender, sess)
 
 def clear_session_data(sender):
     sess = get_session(sender)
     sess['data']  = {}
     sess['state'] = 'menu'
+    save_session(sender, sess)
 
 # ─── FONNTE API ───────────────────────────────────────────────────
 def send_wa(target, message):
@@ -413,6 +473,7 @@ def mulai_order(sender, session):
     session['data']['produk_map'] = nomor_map
     session['data']['cart']       = []
     session['state']              = 'order_pilih_produk'
+    save_session(sender, session)
     send_wa(sender, msg + '\n\n*Ketik nomor produk untuk memesan:*')
 
 def handle_order_pilih_produk(sender, session, text):
@@ -424,6 +485,7 @@ def handle_order_pilih_produk(sender, session, text):
     p = produk_map[text]
     session['data']['produk_dipilih'] = p
     session['state'] = 'order_input_volume'
+    save_session(sender, session)
 
     h_ml = p.get('harga_per_ml', 0)
     send_wa(sender,
@@ -461,6 +523,7 @@ def handle_order_input_volume(sender, session, text):
         'total':    total
     })
     session['state'] = 'order_lanjut_atau_checkout'
+    save_session(sender, session)
 
     send_wa(sender,
         f'✅ Ditambahkan ke keranjang:\n'
@@ -478,9 +541,11 @@ def handle_order_lanjut_atau_checkout(sender, session, text):
         msg, nomor_map = pesan_daftar_produk(produk_list)
         session['data']['produk_map'] = nomor_map
         session['state'] = 'order_pilih_produk'
+        save_session(sender, session)
         send_wa(sender, msg + '\n\n*Ketik nomor produk berikutnya:*')
     elif text == '2':
         session['state'] = 'order_input_nama'
+        save_session(sender, session)
         send_wa(sender, '📝 Masukkan *nama lengkap* Anda:\n_(Ketik 0 untuk batal)_')
     else:
         send_wa(sender, 'Ketik *1* tambah produk, *2* lanjut, atau *0* batalkan.')
@@ -491,6 +556,7 @@ def handle_order_input_nama(sender, session, text):
         return
     session['data']['nama_pelanggan'] = text
     session['state'] = 'order_input_alamat'
+    save_session(sender, session)
     send_wa(sender,
         f'📍 Halo *{text}*!\n\n'
         f'Masukkan *alamat lengkap* pengiriman:\n'
@@ -504,6 +570,7 @@ def handle_order_input_alamat(sender, session, text):
         return
     session['data']['alamat'] = text
     session['state'] = 'order_konfirmasi'
+    save_session(sender, session)
 
     cart  = session['data'].get('cart', [])
     nama  = session['data'].get('nama_pelanggan', '')

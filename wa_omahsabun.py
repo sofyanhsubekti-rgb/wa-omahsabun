@@ -29,6 +29,8 @@ WEBAPP_SECRET = os.environ.get('WEBAPP_SECRET', 'omahsabun_naraya_2024')
 GEMINI_KEY    = os.environ.get('GEMINI_API_KEY', '')
 ADMIN_WA      = os.environ.get('ADMIN_WA', '')          # format: 628xxx (tanpa +)
 ADMIN_SECRET  = os.environ.get('ADMIN_SECRET', 'admin dara')  # keyword panel admin
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')   # token dari BotFather
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')     # chat_id admin Telegram
 
 NAMA_TOKO = 'Omah Sabun'
 NAMA_PT   = 'PT Naraya Jagad Sejahtera'
@@ -116,6 +118,24 @@ def send_wa(target, message):
     except Exception as e:
         log.error(f'send_wa error: {e}')
         return None
+
+def notify_telegram(message):
+    """Kirim notifikasi ke Telegram admin."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        r = requests.post(
+            f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
+            json={
+                'chat_id':    TELEGRAM_CHAT_ID,
+                'text':       message,
+                'parse_mode': 'HTML'
+            },
+            timeout=10
+        )
+        log.info(f'Telegram notify: {r.status_code}')
+    except Exception as e:
+        log.error(f'Telegram notify error: {e}')
 
 def format_nomor(nomor):
     """Konversi nomor lokal ke format internasional (tanpa +)."""
@@ -558,6 +578,16 @@ def handle_order_konfirmasi(sender, session, text):
                 f'🧴 {produk_str}\n'
                 f'💰 {fmt_rp(total)}'
             )
+        notify_telegram(
+            f'🔔 <b>ORDER BARU MASUK!</b>\n\n'
+            f'📋 No: <b>{no_order}</b>\n'
+            f'👤 {nama}\n'
+            f'📱 {sender}\n'
+            f'📍 {alamat}\n'
+            f'🧴 {produk_str}\n'
+            f'💰 {fmt_rp(total)}\n\n'
+            f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+        )
     else:
         send_wa(sender,
             '⚠️ Maaf, terjadi kesalahan saat menyimpan order.\n'

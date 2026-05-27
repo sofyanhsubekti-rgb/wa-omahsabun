@@ -18,6 +18,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import requests
@@ -57,9 +58,7 @@ if GEMINI_KEY:
         for _model_name in ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-1.0-pro']:
             try:
                 ai_model = genai.GenerativeModel(_model_name)
-                # Test quick
-                _test = ai_model.generate_content('hi')
-                log.info(f'Gemini model aktif: {_model_name}')
+                log.info(f'Gemini model dipilih: {_model_name}')
                 break
             except Exception as _e:
                 log.warning(f'Model {_model_name} gagal: {_e}')
@@ -204,6 +203,9 @@ def format_nomor(nomor):
         nomor = '62' + nomor[1:]
     elif nomor.startswith('+'):
         nomor = nomor[1:]
+    elif nomor.startswith('8') and not nomor.startswith('62'):
+        # Nomor Indonesia tanpa '0' di depan, misal: 82312345678
+        nomor = '62' + nomor
     return nomor
 
 # ─── GOOGLE SHEETS API ────────────────────────────────────────────
@@ -251,7 +253,7 @@ def get_produk():
 
     # Gunakan cache jika masih segar
     if _produk_cache and _produk_cache_time:
-        if (now - _produk_cache_time).seconds < CACHE_TTL:
+        if (now - _produk_cache_time).total_seconds() < CACHE_TTL:
             return _produk_cache
 
     # Coba ambil dari API
@@ -451,6 +453,7 @@ def handle_admin_command(sender, text_raw):
                         r = send_wa(format_nomor(str(nomor)), pesan_blast)
                         if r:
                             berhasil += 1
+                        time.sleep(0.3)  # jeda antar kirim, hindari rate-limit Fonnte
                     send_wa(sender, f'✅ Blast selesai: *{berhasil}/{len(nomor_list)}* berhasil.\n\nKetik *0* untuk menu.')
                 else:
                     send_wa(sender, '⚠️ Tidak ada nomor pelanggan di Sheets.\n\nKetik *0* untuk menu.')
@@ -511,7 +514,13 @@ def handle_order_input_volume(sender, session, text):
         send_wa(sender, f'⚠️ Maksimal order via bot adalah *20.000 ml*.\nUntuk order lebih besar, hubungi admin langsung.\n\nKetik *0* untuk batal.')
         return
 
-    p      = session['data']['produk_dipilih']
+    p = session['data'].get('produk_dipilih')
+    if not p:
+        log.error(f'handle_order_input_volume: produk_dipilih tidak ada untuk {sender}')
+        send_wa(sender, '⚠️ Terjadi kesalahan sesi. Silakan ketik *2* untuk mulai order baru.')
+        set_state(sender, 'menu')
+        return
+
     h_ml   = p.get('harga_per_ml', 0)
     total  = int(h_ml * vol)
 
@@ -607,6 +616,14 @@ def handle_order_konfirmasi(sender, session, text):
     cart      = session['data'].get('cart', [])
     nama      = session['data'].get('nama_pelanggan', '')
     alamat    = session['data'].get('alamat', '')
+
+    # Guard: cart tidak boleh kosong
+    if not cart:
+        log.error(f'handle_order_konfirmasi: cart kosong untuk {sender}')
+        send_wa(sender, '⚠️ Keranjang belanja kosong. Silakan ketik *2* untuk mulai order baru.')
+        clear_session_data(sender)
+        return
+
     total     = sum(i['total'] for i in cart)
     produk_str = '; '.join([f'{i["nama"]} {i["volume"]:,}ml' for i in cart])
 
@@ -656,11 +673,14 @@ def handle_order_konfirmasi(sender, session, text):
             f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
         )
     else:
+        # Order gagal — JANGAN hapus session, beri opsi retry
         send_wa(sender,
-            '⚠️ Maaf, terjadi kesalahan saat menyimpan order.\n'
-            'Silakan hubungi admin langsung atau coba lagi.\n\n'
-            'Ketik *0* untuk menu'
+            '⚠️ Maaf, terjadi kesalahan saat menyimpan order.\n\n'
+            '1️⃣ Ketik *1* untuk coba konfirmasi lagi\n'
+            '0️⃣ Ketik *0* untuk batalkan dan kembali ke menu'
         )
+        # State tetap order_konfirmasi agar bisa retry
+        return
 
     clear_session_data(sender)
 
@@ -996,6 +1016,7 @@ def blast():
             else:
                 gagal += 1
                 errors.append(nomor_fmt)
+            time.sleep(0.3)  # jeda antar kirim, hindari rate-limit Fonnte
 
         log.info(f'Blast selesai: {berhasil} berhasil, {gagal} gagal dari {len(nomor_list)} nomor')
         return jsonify({

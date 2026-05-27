@@ -34,7 +34,7 @@ NAMA_TOKO = 'Omah Sabun'
 NAMA_PT   = 'PT Naraya Jagad Sejahtera'
 ALAMAT    = os.environ.get('ALAMAT_TOKO', 'Hubungi admin untuk info alamat lengkap')
 JAM_BUKA  = os.environ.get('JAM_BUKA',   'Senin - Sabtu: 08.00 - 17.00 WIB')
-KOTA      = os.environ.get('KOTA',       'Yogyakarta')
+KOTA      = os.environ.get('KOTA',       'Purbalingga')
 
 SESSION_TIMEOUT = 1800  # 30 menit tanpa aktivitas → reset sesi
 

@@ -394,7 +394,7 @@ def pesan_admin_panel():
         f'📋 Lihat order terbaru:\nKetik */order*\n\n'
         f'📢 Blast ke pelanggan:\nKetik */blast [pesan]*\n\n'
         f'🔄 Reload cache produk:\nKetik */reload*\n\n'
-        f'📱 Total sesi aktif: {len(user_sessions)}\n\n'
+        f'📱 Session DB: {SESSION_DB}\n\n'
         f'━━━━━━━━━━━━━━━━━━━━\n'
         f'Ketik *0* untuk kembali ke menu utama'
     )

@@ -275,7 +275,9 @@ def parse_website_message(text):
                 if val and val != '-' and 'jika ingin' not in val.lower() and val != 'Isi jika ingin cek order':
                     data['no_order'] = val
             elif line.startswith('Produk diminati:'):
-                data['produk'] = line[16:].strip()
+                val = line[16:].strip()
+                if val and val != '-':
+                    data['produk'] = val
             elif line.startswith('Catatan:'):
                 data['catatan'] = line[8:].strip()
         return {'type': 'form_website', 'data': data}
@@ -400,44 +402,26 @@ def handle_website_message(sender, session, parsed, pushname=''):
         catatan   = data.get('catatan', '')
         _prefill_session(sender, session, nama=nama, kota=kota)
 
-        if 'cek status' in kebutuhan or no_order:
-            # Cek status order
-            if no_order:
-                reply = (
-                    f'Halo {sapa}! 👋\n\n'
-                    f'Saya cek status order *{no_order}* ya...\n'
-                    f'Admin akan segera konfirmasi via WA ini 😊\n\n'
-                    f'_(Ketik *0* untuk menu utama)_'
-                )
-                if ADMIN_WA:
-                    send_wa(ADMIN_WA,
-                        f'📩 *CEK STATUS ORDER (website)*\n'
-                        f'👤 {nama} | {sender}\n'
-                        f'📋 No Order: {no_order}\n'
-                        f'🏙️ {kota or "-"}'
-                    )
-            else:
-                reply = (
-                    f'Halo {sapa}! 👋\n\n'
-                    f'Untuk cek status order, kirimkan nomor order-nya kak 😊\n'
-                    f'Format: *ORD-YYYYMMDD-XXX*\n\n'
-                    f'_(Ketik *0* untuk menu utama)_'
-                )
-            set_state(sender, 'menu')
-            send_wa(sender, reply)
-
-        elif 'reseller' in kebutuhan or 'grosir' in kebutuhan:
+        # PENTING: cek reseller/grosir DULU sebelum cek no_order
+        # agar form reseller dengan field "Nomor order" tidak salah masuk ke cek status
+        if 'reseller' in kebutuhan or 'grosir' in kebutuhan or 'daftar reseller' in kebutuhan:
             # Lead reseller/grosir
             wa_reseller = data.get('wa', sender)
+            catatan_txt = catatan or ''
+            # Bangun jawaban yang juga menjawab pertanyaan umum reseller (harga khusus, MOQ, dll)
             reply = (
                 f'Halo {sapa}! 🎉\n\n'
-                f'Wah, kak tertarik jadi *reseller/grosir* Omah Sabun!\n\n'
-                f'Produk diminati: *{produk or "belum disebutkan"}*\n'
-                f'Area: *{kota or "belum disebutkan"}*\n\n'
-                f'Admin kita akan segera follow up untuk info harga dan MOQ ya 😊\n\n'
-                f'Sambil menunggu, bisa tanya langsung ke Dara:\n'
-                f'5️⃣ Ketik *5* untuk chat CS\n'
-                f'2️⃣ Ketik *2* untuk lihat produk\n\n'
+                f'Wah, kak tertarik jadi *Reseller Omah Sabun*! Siap kita bantu 😊\n\n'
+                f'*Info singkat program reseller:*\n'
+                f'✅ Reseller MENDAPAT harga khusus (lebih murah dari harga normal)\n'
+                f'✅ Diskon makin besar sesuai volume order\n'
+                f'✅ Bisa order produk apapun dari lini DARA\n'
+                f'✅ Support materi promosi dari Omah Sabun\n\n'
+                f'Area kak: *{kota or "belum disebutkan"}*\n\n'
+                f'Admin kita akan segera follow up via WA ini untuk info harga reseller & MOQ ya kak! 📞\n\n'
+                f'Sambil menunggu:\n'
+                f'5️⃣ Ketik *5* untuk tanya Dara CS\n'
+                f'1️⃣ Ketik *1* untuk lihat produk kami\n\n'
                 f'_(Ketik *0* untuk menu utama)_'
             )
             set_state(sender, 'menu')
@@ -465,6 +449,32 @@ def handle_website_message(sender, session, parsed, pushname=''):
                 f'❓ Catatan: {catatan or "-"}\n\n'
                 f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
             )
+
+        elif 'cek status' in kebutuhan or no_order:
+            # Cek status order — hanya masuk sini jika bukan reseller
+            if no_order:
+                reply = (
+                    f'Halo {sapa}! 👋\n\n'
+                    f'Saya cek status order *{no_order}* ya...\n'
+                    f'Admin akan segera konfirmasi via WA ini 😊\n\n'
+                    f'_(Ketik *0* untuk menu utama)_'
+                )
+                if ADMIN_WA:
+                    send_wa(ADMIN_WA,
+                        f'📩 *CEK STATUS ORDER (website)*\n'
+                        f'👤 {nama} | {sender}\n'
+                        f'📋 No Order: {no_order}\n'
+                        f'🏙️ {kota or "-"}'
+                    )
+            else:
+                reply = (
+                    f'Halo {sapa}! 👋\n\n'
+                    f'Untuk cek status order, kirimkan nomor order-nya kak 😊\n'
+                    f'Format: *ORD-YYYYMMDD-XXX*\n\n'
+                    f'_(Ketik *0* untuk menu utama)_'
+                )
+            set_state(sender, 'menu')
+            send_wa(sender, reply)
 
         else:
             # Inquiry umum dari form

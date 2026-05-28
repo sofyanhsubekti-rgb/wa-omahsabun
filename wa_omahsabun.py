@@ -196,6 +196,402 @@ def notify_telegram(message):
     except Exception as e:
         log.error(f'Telegram notify error: {e}')
 
+# ─── WEBSITE MESSAGE PARSER ───────────────────────────────────────
+def _parse_volume_to_ml(val_str, ukuran_ml=1000):
+    """
+    Parse string jumlah/volume ke total ml.
+    Contoh: '5 liter'→5000, '5 L'→5000, '1000'→1000, '3'→3×ukuran_ml=3000
+    """
+    import re
+    s = str(val_str).strip().lower()
+    m = re.search(r'(\d+(?:[.,]\d+)?)', s)
+    if not m:
+        return ukuran_ml
+    num = float(m.group(1).replace(',', '.'))
+    if 'liter' in s or s.endswith(' l') or s == f'{int(num)}l':
+        return int(num * 1000)
+    if 'ml' in s:
+        return int(num)
+    # Tanpa satuan: jika >= 500 anggap ml, jika kecil anggap jumlah unit
+    if num >= 500:
+        return int(num)
+    return int(num * ukuran_ml)
+
+
+def parse_website_message(text):
+    """
+    Deteksi dan parse 4 format pesan dari website omahsabun.com.
+    Format 1 : tombol umum (Chat Admin, Order via WA, Order WA)
+    Format 2 : form website (Kirim ke WhatsApp)
+    Format 3a: katalog multi-produk (Kirim Pilihan)
+    Format 3b: katalog satu produk (tombol Pilih per produk)
+    Return dict {'type': ..., 'data': {...}} atau None jika bukan dari website.
+    """
+    t = text.strip()
+
+    # FORMAT 1 — Tombol umum (Chat Admin, Order via WA, dll)
+    if t.startswith('Halo admin Omah Sabun, saya mau tanya produk kebersihan'):
+        data = {}
+        for line in t.split('\n'):
+            line = line.strip()
+            if line.startswith('Nama:'):
+                val = line[5:].strip()
+                if val and '/' not in val:
+                    data['nama'] = val
+            elif line.startswith('Alamat/Kota:'):
+                val = line[12:].strip()
+                if val and '/' not in val:
+                    data['kota'] = val
+            elif line.startswith('Kebutuhan:'):
+                val = line[10:].strip()
+                if val and '/' not in val:
+                    data['kebutuhan'] = val
+            elif line.startswith('Produk yang dicari:'):
+                val = line[19:].strip()
+                if val:
+                    data['produk'] = val
+            elif line.startswith('Jumlah kebutuhan:'):
+                val = line[17:].strip()
+                if val:
+                    data['jumlah'] = val
+        return {'type': 'general_inquiry', 'data': data}
+
+    # FORMAT 2 — Form website (Kirim ke WhatsApp)
+    if t.startswith('Halo admin Omah Sabun, saya mengisi form website'):
+        data = {}
+        for line in t.split('\n'):
+            line = line.strip()
+            if line.startswith('Nama:'):
+                data['nama'] = line[5:].strip()
+            elif line.startswith('WhatsApp:'):
+                data['wa'] = line[9:].strip()
+            elif line.startswith('Kota/Area:'):
+                data['kota'] = line[10:].strip()
+            elif line.startswith('Kebutuhan:'):
+                data['kebutuhan'] = line[10:].strip()
+            elif line.startswith('Nomor order:'):
+                val = line[12:].strip()
+                # Filter placeholder: kosong, "-", atau teks default form
+                if val and val != '-' and 'jika ingin' not in val.lower() and val != 'Isi jika ingin cek order':
+                    data['no_order'] = val
+            elif line.startswith('Produk diminati:'):
+                data['produk'] = line[16:].strip()
+            elif line.startswith('Catatan:'):
+                data['catatan'] = line[8:].strip()
+        return {'type': 'form_website', 'data': data}
+
+    # FORMAT 3 — Katalog (Kirim Pilihan)
+    if t.startswith('Halo admin Omah Sabun, saya mau tanya/order beberapa produk'):
+        data = {'produk_list': []}
+        current = None
+        for line in t.split('\n'):
+            line = line.strip()
+            if line.startswith('Nama:'):
+                val = line[5:].strip()
+                if val and '/' not in val:
+                    data['nama'] = val
+            elif line.startswith('Alamat/Kota:'):
+                val = line[12:].strip()
+                if val and '/' not in val:
+                    data['kota'] = val
+            elif line.startswith('Kebutuhan:'):
+                val = line[10:].strip()
+                if val and '/' not in val:
+                    data['kebutuhan'] = val
+            elif line and line[0].isdigit() and '. ' in line:
+                current = {'nama': line.split('. ', 1)[1].strip(), 'volume_ml': 1000, 'jumlah': 1, 'harga_str': ''}
+                data['produk_list'].append(current)
+            elif current:
+                if line.startswith('Ukuran:'):
+                    val = line[7:].strip().upper().replace(' ML', '').replace('ML', '').replace(',', '')
+                    try:
+                        current['volume_ml'] = int(val)
+                    except:
+                        pass
+                elif line.startswith('Harga:'):
+                    current['harga_str'] = line[6:].strip()
+                elif line.startswith('Jumlah:'):
+                    val = line[7:].strip()
+                    if val and 'belum' not in val.lower() and val != '-':
+                        # FIX: gunakan _parse_volume_to_ml agar handle "5 liter", "1000", dll
+                        current['total_ml'] = _parse_volume_to_ml(val, current.get('volume_ml', 1000))
+        return {'type': 'catalog_order', 'data': data}
+
+    # FORMAT 3b — Katalog satu produk (tombol "Pilih" per produk)
+    if t.startswith('Halo admin Omah Sabun, saya mau tanya/order produk berikut'):
+        data = {'produk_list': []}
+        current = {'nama': '', 'volume_ml': 1000, 'total_ml': 0, 'harga_str': ''}
+        ukuran_ml = 1000
+        jumlah_raw = None
+        for line in t.split('\n'):
+            line = line.strip()
+            if line.startswith('Nama:'):
+                val = line[5:].strip()
+                if val and '/' not in val:
+                    data['nama'] = val
+            elif line.startswith('Alamat/Kota:'):
+                val = line[12:].strip()
+                if val and '/' not in val:
+                    data['kota'] = val
+            elif line.startswith('Kebutuhan:'):
+                val = line[10:].strip()
+                if val and '/' not in val:
+                    data['kebutuhan'] = val
+            elif line.startswith('Produk:'):
+                current['nama'] = line[7:].strip()
+            elif line.startswith('Kategori:'):
+                current['kategori'] = line[9:].strip()
+            elif line.startswith('Ukuran:'):
+                val = line[7:].strip().upper().replace(' ML', '').replace('ML', '').replace(',', '')
+                try:
+                    ukuran_ml = int(val)
+                    current['volume_ml'] = ukuran_ml
+                except:
+                    pass
+            elif line.startswith('Harga:'):
+                current['harga_str'] = line[6:].strip()
+            elif line.startswith('Jumlah:'):
+                jumlah_raw = line[7:].strip()
+        # Parse jumlah setelah semua baris dibaca (agar ukuran_ml sudah diketahui)
+        if jumlah_raw and 'belum' not in jumlah_raw.lower() and jumlah_raw != '-':
+            current['total_ml'] = _parse_volume_to_ml(jumlah_raw, ukuran_ml)
+        else:
+            current['total_ml'] = ukuran_ml  # default: 1 unit
+        if current['nama']:
+            data['produk_list'].append(current)
+        return {'type': 'catalog_order', 'data': data}
+
+    return None
+
+
+def handle_website_message(sender, session, parsed, pushname=''):
+    """Handle semua format pesan dari website omahsabun.com."""
+    msg_type = parsed['type']
+    data     = parsed['data']
+    nama     = data.get('nama', '').strip() or pushname or ''
+    sapa     = f'*{nama}*' if nama else 'kak'
+
+    # ── FORMAT 1: Tombol umum ──────────────────────────────────────
+    if msg_type == 'general_inquiry':
+        produk   = data.get('produk', '')
+        kebutuhan = data.get('kebutuhan', '')
+        reply    = f'Halo {sapa}! 👋 Dara dari *Omah Sabun* di sini!\n\n'
+        if produk:
+            reply += f'Noted, kak mau tanya soal *{produk}* ya 🧴\n\n'
+        if kebutuhan:
+            reply += f'Kebutuhan kak: *{kebutuhan}*\n\n'
+        reply += (
+            f'Pilih menu:\n\n'
+            f'1️⃣ Lihat Produk & Harga\n'
+            f'2️⃣ Order Sekarang\n'
+            f'5️⃣ Tanya CS Dara\n\n'
+            f'_(Ketik angka untuk memilih)_'
+        )
+        _prefill_session(sender, session, nama=nama, kota=data.get('kota', ''))
+        set_state(sender, 'menu')
+        send_wa(sender, reply)
+
+    # ── FORMAT 2: Form website ─────────────────────────────────────
+    elif msg_type == 'form_website':
+        kebutuhan = data.get('kebutuhan', '').lower()
+        no_order  = data.get('no_order', '')
+        produk    = data.get('produk', '')
+        kota      = data.get('kota', '')
+        catatan   = data.get('catatan', '')
+        _prefill_session(sender, session, nama=nama, kota=kota)
+
+        if 'cek status' in kebutuhan or no_order:
+            # Cek status order
+            if no_order:
+                reply = (
+                    f'Halo {sapa}! 👋\n\n'
+                    f'Saya cek status order *{no_order}* ya...\n'
+                    f'Admin akan segera konfirmasi via WA ini 😊\n\n'
+                    f'_(Ketik *0* untuk menu utama)_'
+                )
+                if ADMIN_WA:
+                    send_wa(ADMIN_WA,
+                        f'📩 *CEK STATUS ORDER (website)*\n'
+                        f'👤 {nama} | {sender}\n'
+                        f'📋 No Order: {no_order}\n'
+                        f'🏙️ {kota or "-"}'
+                    )
+            else:
+                reply = (
+                    f'Halo {sapa}! 👋\n\n'
+                    f'Untuk cek status order, kirimkan nomor order-nya kak 😊\n'
+                    f'Format: *ORD-YYYYMMDD-XXX*\n\n'
+                    f'_(Ketik *0* untuk menu utama)_'
+                )
+            set_state(sender, 'menu')
+            send_wa(sender, reply)
+
+        elif 'reseller' in kebutuhan or 'grosir' in kebutuhan:
+            # Lead reseller/grosir
+            wa_reseller = data.get('wa', sender)
+            reply = (
+                f'Halo {sapa}! 🎉\n\n'
+                f'Wah, kak tertarik jadi *reseller/grosir* Omah Sabun!\n\n'
+                f'Produk diminati: *{produk or "belum disebutkan"}*\n'
+                f'Area: *{kota or "belum disebutkan"}*\n\n'
+                f'Admin kita akan segera follow up untuk info harga dan MOQ ya 😊\n\n'
+                f'Sambil menunggu, bisa tanya langsung ke Dara:\n'
+                f'5️⃣ Ketik *5* untuk chat CS\n'
+                f'2️⃣ Ketik *2* untuk lihat produk\n\n'
+                f'_(Ketik *0* untuk menu utama)_'
+            )
+            set_state(sender, 'menu')
+            send_wa(sender, reply)
+            # WA Admin — data lengkap
+            if ADMIN_WA:
+                send_wa(ADMIN_WA,
+                    f'🏪 *PENDAFTARAN RESELLER/GROSIR (website)*\n'
+                    f'━━━━━━━━━━━━━━━━━━━━\n'
+                    f'👤 Nama   : {nama or "-"}\n'
+                    f'📱 WA     : {wa_reseller}\n'
+                    f'🏙️ Area   : {kota or "-"}\n'
+                    f'📦 Produk : {produk or "-"}\n'
+                    f'❓ Catatan: {catatan or "-"}\n'
+                    f'━━━━━━━━━━━━━━━━━━━━\n'
+                    f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+                )
+            # Telegram — notifikasi lengkap
+            notify_telegram(
+                f'🏪 <b>LEAD RESELLER dari website!</b>\n\n'
+                f'👤 Nama   : {nama or "-"}\n'
+                f'📱 WA     : {wa_reseller}\n'
+                f'🏙️ Area   : {kota or "-"}\n'
+                f'📦 Produk : {produk or "-"}\n'
+                f'❓ Catatan: {catatan or "-"}\n\n'
+                f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+            )
+
+        else:
+            # Inquiry umum dari form
+            reply = (
+                f'Halo {sapa}! 👋 Dara di sini!\n\n'
+                f'Terima kasih sudah mengisi form di website Omah Sabun 🧼\n\n'
+            )
+            if produk:
+                reply += f'Noted, kak tertarik dengan *{produk}* ya!\n\n'
+            reply += (
+                f'Admin kita segera follow up. Atau langsung:\n\n'
+                f'2️⃣ *Order sekarang*\n'
+                f'5️⃣ *Tanya CS Dara*\n\n'
+                f'_(Ketik angka untuk memilih, atau *0* untuk menu)_'
+            )
+            set_state(sender, 'menu')
+            send_wa(sender, reply)
+
+    # ── FORMAT 3: Katalog order ────────────────────────────────────
+    elif msg_type == 'catalog_order':
+        produk_list = data.get('produk_list', [])
+        kota        = data.get('kota', '')
+        _prefill_session(sender, session, nama=nama, kota=kota)
+
+        if not produk_list:
+            set_state(sender, 'menu')
+            send_wa(sender,
+                f'Halo {sapa}! 👋 Dara dari Omah Sabun!\n\n'
+                f'Mau order produk apa? Ketik *2* untuk mulai 😊\n\n'
+                f'_(Ketik *0* untuk menu)_'
+            )
+            return
+
+        # Match produk dari katalog dan build cart
+        all_produk = get_produk()
+        cart       = []
+        unmatched  = []
+
+        for wp in produk_list:
+            nama_wp  = wp.get('nama', '').lower()
+            # Gunakan total_ml jika ada (hasil parse jumlah), fallback ke volume_ml × jumlah
+            vol_ml   = wp.get('total_ml') or (wp.get('volume_ml', 1000) * wp.get('jumlah', 1))
+            if vol_ml < 500:
+                vol_ml = wp.get('volume_ml', 1000)  # minimal 1 unit
+            matched  = None
+            for p in all_produk:
+                kata = [k for k in nama_wp.split() if len(k) > 3]
+                if any(k in p['nama'].lower() for k in kata):
+                    matched = p
+                    break
+            if matched:
+                h_ml = matched.get('harga_per_ml', 0)
+                cart.append({
+                    'id':       matched.get('id', ''),
+                    'nama':     matched['nama'],
+                    'volume':   vol_ml,
+                    'harga_ml': h_ml,
+                    'total':    int(h_ml * vol_ml)
+                })
+            else:
+                unmatched.append(wp.get('nama', ''))
+
+        if cart:
+            # Pre-fill cart, langsung ke input nama
+            sess = get_session(sender)
+            sess['data']['cart'] = cart
+            if nama:
+                sess['data']['prefill_nama'] = nama
+            if kota:
+                sess['data']['prefill_kota'] = kota
+            sess['state'] = 'order_input_nama'
+            save_session(sender, sess)
+
+            total = sum(i['total'] for i in cart)
+            msg   = f'Halo {sapa}! 👋 Dara dari Omah Sabun!\n\n'
+            msg  += '🛒 *KERANJANG DARI KATALOG WEBSITE:*\n'
+            msg  += '━━━━━━━━━━━━━━━━━━━━\n\n'
+            for item in cart:
+                msg += f'🧴 {item["nama"]}\n'
+                msg += f'   {item["volume"]:,} ml — *{fmt_rp(item["total"])}*\n\n'
+            if unmatched:
+                msg += f'⚠️ Tidak ditemukan: {", ".join(unmatched)}\n\n'
+            msg += f'💰 *Total Estimasi: {fmt_rp(total)}*\n'
+            msg += '━━━━━━━━━━━━━━━━━━━━\n\n'
+            msg += '📝 Masukkan *nama lengkap* untuk lanjut:\n_(Ketik *0* untuk batal)_'
+            send_wa(sender, msg)
+            # Notif admin + Telegram: ada calon order dari website
+            produk_str_notif = '; '.join([f'{i["nama"]} {i["volume"]:,}ml' for i in cart])
+            if ADMIN_WA:
+                send_wa(ADMIN_WA,
+                    f'🌐 *ORDER DARI WEBSITE (proses checkout)*\n'
+                    f'📱 {sender}\n'
+                    f'🧴 {produk_str_notif}\n'
+                    f'💰 Estimasi: {fmt_rp(total)}\n'
+                    f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+                )
+            notify_telegram(
+                f'🌐 <b>ORDER DARI WEBSITE — checkout dimulai</b>\n\n'
+                f'📱 {sender}\n'
+                f'🧴 {produk_str_notif}\n'
+                f'💰 Estimasi: <b>{fmt_rp(total)}</b>\n\n'
+                f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+            )
+        else:
+            # Produk tidak cocok — arahkan ke order manual
+            set_state(sender, 'menu')
+            produk_names = ', '.join([p.get('nama', '') for p in produk_list])
+            send_wa(sender,
+                f'Halo {sapa}! 👋 Dara dari Omah Sabun!\n\n'
+                f'Kak tertarik dengan: *{produk_names}*\n\n'
+                f'Yuk order via bot ini:\n'
+                f'2️⃣ Ketik *2* untuk order\n'
+                f'5️⃣ Ketik *5* untuk tanya Dara\n\n'
+                f'_(Ketik *0* untuk menu utama)_'
+            )
+
+
+def _prefill_session(sender, session, nama='', kota=''):
+    """Simpan data prefill dari website ke sesi."""
+    if nama or kota:
+        if nama:
+            session['data']['prefill_nama'] = nama
+        if kota:
+            session['data']['prefill_kota'] = kota
+        save_session(sender, session)
+
+
 def format_nomor(nomor):
     """Konversi nomor lokal ke format internasional (tanpa +)."""
     nomor = str(nomor).strip().replace(' ', '').replace('-', '')
@@ -565,13 +961,26 @@ def handle_order_input_nama(sender, session, text):
         return
     session['data']['nama_pelanggan'] = text
     session['state'] = 'order_input_alamat'
+    # Cek apakah ada prefill kota dari website
+    prefill_kota = session['data'].get('prefill_kota', '')
     save_session(sender, session)
-    send_wa(sender,
-        f'📍 Halo *{text}*!\n\n'
-        f'Masukkan *alamat lengkap* pengiriman:\n'
-        f'_(termasuk nama jalan, nomor, RT/RW, kelurahan, kecamatan)_\n\n'
-        f'Ketik *0* untuk batal'
-    )
+
+    if prefill_kota:
+        # Tampilkan kota yang sudah diisi dari website sebagai referensi
+        send_wa(sender,
+            f'📍 Halo *{text}*!\n\n'
+            f'Masukkan *alamat lengkap* pengiriman:\n'
+            f'_(termasuk nama jalan, nomor, RT/RW, kelurahan, kecamatan)_\n\n'
+            f'💡 Kota dari website: *{prefill_kota}*\n\n'
+            f'Ketik *0* untuk batal'
+        )
+    else:
+        send_wa(sender,
+            f'📍 Halo *{text}*!\n\n'
+            f'Masukkan *alamat lengkap* pengiriman:\n'
+            f'_(termasuk nama jalan, nomor, RT/RW, kelurahan, kecamatan)_\n\n'
+            f'Ketik *0* untuk batal'
+        )
 
 def handle_order_input_alamat(sender, session, text):
     if len(text) < 5:
@@ -858,6 +1267,12 @@ def handle_message(sender, text, pushname=''):
         handled = handle_admin_command(sender, text_raw)
         if handled:
             return
+
+    # ── Deteksi pesan dari website omahsabun.com ──
+    parsed_web = parse_website_message(text_raw)
+    if parsed_web:
+        handle_website_message(sender, session, parsed_web, pushname)
+        return
 
     # ── Global reset keywords ──
     if text_lower in KEYWORD_RESET or text_raw == '0':

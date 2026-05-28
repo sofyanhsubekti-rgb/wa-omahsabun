@@ -551,23 +551,8 @@ def handle_website_message(sender, session, parsed, pushname=''):
             msg += '━━━━━━━━━━━━━━━━━━━━\n\n'
             msg += '📝 Masukkan *nama lengkap* untuk lanjut:\n_(Ketik *0* untuk batal)_'
             send_wa(sender, msg)
-            # Notif admin + Telegram: ada calon order dari website
-            produk_str_notif = '; '.join([f'{i["nama"]} {i["volume"]:,}ml' for i in cart])
-            if ADMIN_WA:
-                send_wa(ADMIN_WA,
-                    f'🌐 *ORDER DARI WEBSITE (proses checkout)*\n'
-                    f'📱 {sender}\n'
-                    f'🧴 {produk_str_notif}\n'
-                    f'💰 Estimasi: {fmt_rp(total)}\n'
-                    f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
-                )
-            notify_telegram(
-                f'🌐 <b>ORDER DARI WEBSITE — checkout dimulai</b>\n\n'
-                f'📱 {sender}\n'
-                f'🧴 {produk_str_notif}\n'
-                f'💰 Estimasi: <b>{fmt_rp(total)}</b>\n\n'
-                f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
-            )
+            # Notif Telegram hanya dikirim sekali saat order DIKONFIRMASI (bukan saat checkout dimulai)
+            # agar admin tidak dapat notif ganda per order
         else:
             # Produk tidak cocok — arahkan ke order manual
             set_state(sender, 'menu')

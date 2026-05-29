@@ -418,13 +418,18 @@ def handle_website_message(sender, session, parsed, pushname=''):
                 f'✅ Bisa order produk apapun dari lini DARA\n'
                 f'✅ Support materi promosi dari Omah Sabun\n\n'
                 f'Area kak: *{kota or "belum disebutkan"}*\n\n'
-                f'Admin kita akan segera follow up via WA ini untuk info harga reseller & MOQ ya kak! 📞\n\n'
-                f'Sambil menunggu:\n'
-                f'5️⃣ Ketik *5* untuk tanya Dara CS\n'
-                f'1️⃣ Ketik *1* untuk lihat produk kami\n\n'
+                f'Mau lanjut gimana kak? 😊\n\n'
+                f'1️⃣ *Chat langsung dengan Owner* — tanya harga & MOQ reseller sekarang\n'
+                f'2️⃣ *Ceritakan kebutuhan lebih detail* — Dara bantu proses\n\n'
                 f'_(Ketik *0* untuk menu utama)_'
             )
-            set_state(sender, 'menu')
+            # Simpan data reseller ke sesi untuk dipakai di follow-up handler
+            set_state(sender, 'reseller_follow', {
+                'reseller_nama':   nama,
+                'reseller_wa':     wa_reseller,
+                'reseller_kota':   kota,
+                'reseller_catatan': catatan
+            })
             send_wa(sender, reply)
             # WA Admin — data lengkap
             if ADMIN_WA:
@@ -1236,6 +1241,179 @@ def handle_ai_cs(sender, text):
         'Atau ketik *2* untuk langsung order ya! \U0001f60a\n_(Ketik *0* untuk menu utama)_'
     )
 
+# ─── RESELLER HELPERS ─────────────────────────────────────────────
+def _connect_reseller_to_owner(sender, r_nama, r_wa, r_kota, r_ctt):
+    """Helper: kirim nomor owner + notif admin + set state menu."""
+    sapa = f'*{r_nama}*' if r_nama else 'kak'
+    owner_wa = ADMIN_WA or ''
+    if owner_wa:
+        owner_display = '0' + owner_wa[2:] if owner_wa.startswith('62') else owner_wa
+        send_wa(sender,
+            f'Siap {sapa}! 🎉\n\n'
+            f'Langsung chat dengan *Owner Omah Sabun* di:\n'
+            f'📱 *{owner_display}*\n\n'
+            f'Sebutkan bahwa kak tertarik jadi reseller dari *{r_kota or "daerah kak"}* ya 😊\n\n'
+            f'Owner kami sudah dikabari dan siap terima chat kak!\n\n'
+            f'_(Ketik *0* untuk menu utama)_'
+        )
+        send_wa(ADMIN_WA,
+            f'🔥 *RESELLER MINTA DIHUBUNGI SEKARANG!*\n'
+            f'━━━━━━━━━━━━━━━━━━━━\n'
+            f'👤 Nama   : {r_nama or "-"}\n'
+            f'📱 WA     : {r_wa}\n'
+            f'🏙️ Area   : {r_kota or "-"}\n'
+            f'❓ Catatan: {r_ctt or "-"}\n'
+            f'━━━━━━━━━━━━━━━━━━━━\n'
+            f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}\n\n'
+            f'⚡ SEGERA FOLLOW UP!'
+        )
+        notify_telegram(
+            f'🔥 <b>RESELLER MINTA DIHUBUNGI SEKARANG!</b>\n\n'
+            f'👤 Nama   : {r_nama or "-"}\n'
+            f'📱 WA     : {r_wa}\n'
+            f'🏙️ Area   : {r_kota or "-"}\n'
+            f'❓ Catatan: {r_ctt or "-"}\n\n'
+            f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}\n'
+            f'⚡ <b>SEGERA FOLLOW UP!</b>'
+        )
+    else:
+        send_wa(sender,
+            f'Admin kita segera hubungi {sapa}! 📞\n\n'
+            f'Biasanya dalam 1×24 jam ya kak 😊\n\n'
+            f'_(Ketik *0* untuk menu utama)_'
+        )
+
+
+# ─── RESELLER FOLLOW-UP HANDLER ───────────────────────────────────
+def handle_reseller_follow(sender, session, text):
+    """Lanjutan setelah calon reseller menerima info program reseller."""
+    data  = session.get('data', {})
+    r_nama = data.get('reseller_nama', '')
+    r_wa   = data.get('reseller_wa', sender)
+    r_kota = data.get('reseller_kota', '')
+    r_ctt  = data.get('reseller_catatan', '')
+    sapa   = f'*{r_nama}*' if r_nama else 'kak'
+
+    if text == '1':
+        # ── Pilih 1: Connect langsung ke owner ────────────────────
+        _connect_reseller_to_owner(sender, r_nama, r_wa, r_kota, r_ctt)
+        set_state(sender, 'menu')
+
+    elif text == '2':
+        # ── Pilih 2: Detail kebutuhan — tawari panduan / tanya bebas
+        set_state(sender, 'reseller_detail')
+        send_wa(sender,
+            f'Oke {sapa}! 😊\n\n'
+            f'Apakah kak ingin kami kirimkan *Panduan Reseller Omah Sabun*?\n'
+            f'_(berisi info lengkap harga, MOQ, cara order, keuntungan reseller)_\n\n'
+            f'1️⃣ *Ya, kirimkan panduan*\n'
+            f'2️⃣ *Chat langsung Owner sekarang*\n\n'
+            f'Atau ketik pertanyaan kak langsung — Dara siap jawab! 💬\n\n'
+            f'_(Ketik *0* untuk menu utama)_'
+        )
+
+    else:
+        # ── Pertanyaan bebas dari state reseller_follow ────────────
+        handle_reseller_detail(sender, session, text)
+
+
+# ─── RESELLER DETAIL HANDLER ──────────────────────────────────────
+def handle_reseller_detail(sender, session, text):
+    """
+    State reseller_detail: jawab pertanyaan calon reseller via AI,
+    tawari panduan, atau connect ke owner.
+    Setiap jawaban AI selalu sertakan footer opsi chat owner.
+    """
+    data   = session.get('data', {})
+    r_nama = data.get('reseller_nama', '')
+    r_wa   = data.get('reseller_wa', sender)
+    r_kota = data.get('reseller_kota', '')
+    r_ctt  = data.get('reseller_catatan', '')
+    sapa   = f'*{r_nama}*' if r_nama else 'kak'
+
+    OWNER_TRIGGER = {'2', 'owner', 'chat owner', 'hubungi owner', 'langsung owner', 'minta dihubungi'}
+
+    if text == '1':
+        # ── Minta panduan reseller ─────────────────────────────────
+        send_wa(sender,
+            f'Panduan Reseller Omah Sabun segera dikirim ke WA ini {sapa}! 📋\n\n'
+            f'Ada pertanyaan lain? Atau langsung:\n\n'
+            f'2️⃣ *Chat Owner sekarang*\n\n'
+            f'_(Ketik pertanyaan atau *0* untuk menu)_'
+        )
+        if ADMIN_WA:
+            send_wa(ADMIN_WA,
+                f'📋 *RESELLER MINTA PANDUAN — KIRIM SEKARANG!*\n'
+                f'👤 {r_nama or "-"} | 📱 {r_wa}\n'
+                f'🏙️ {r_kota or "-"}\n'
+                f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+            )
+        notify_telegram(
+            f'📋 <b>RESELLER MINTA PANDUAN</b>\n\n'
+            f'👤 {r_nama or "-"}\n'
+            f'📱 {r_wa}\n'
+            f'🏙️ {r_kota or "-"}\n\n'
+            f'⏰ {datetime.now().strftime("%d/%m/%Y %H:%M")}\n'
+            f'⚡ <b>Kirimkan Panduan Reseller!</b>'
+        )
+        # Tetap di state reseller_detail agar bisa tanya lebih lanjut
+
+    elif text.lower() in OWNER_TRIGGER or text == '2':
+        # ── Connect ke owner ───────────────────────────────────────
+        _connect_reseller_to_owner(sender, r_nama, r_wa, r_kota, r_ctt)
+        set_state(sender, 'menu')
+
+    else:
+        # ── Pertanyaan bebas → AI CS konteks reseller ──────────────
+        _footer = (
+            '\n\n━━━━━━━━━━━━━━━━━━━━\n'
+            '1️⃣ *Minta Panduan Reseller*\n'
+            '2️⃣ *Chat langsung Owner*\n'
+            '_(Ketik *0* untuk menu)_'
+        )
+
+        replied = False
+        if ai_model:
+            try:
+                produk_list = get_produk()
+                produk_info = '\n'.join([
+                    f'- {p["nama"]}: Rp{p.get("harga_per_ml",0)}/ml, '
+                    f'500ml=Rp{int(p.get("harga_per_ml",0)*500)}, '
+                    f'1L=Rp{int(p.get("harga_per_ml",0)*1000)}'
+                    for p in produk_list
+                ]) if produk_list else 'Belum ada data produk'
+
+                prompt = (
+                    f'Kamu adalah Dara, CS dari toko sabun "Omah Sabun" di {KOTA}.\n\n'
+                    f'KONTEKS: Customer ini adalah CALON RESELLER dari {r_kota or "Indonesia"}. '
+                    f'Nama: {r_nama or "tidak diketahui"}. '
+                    f'Catatan sebelumnya: {r_ctt or "-"}.\n\n'
+                    f'Karakter Dara: ramah, hangat, bahasa santai Indonesia, pakai "kak", max 5 kalimat, '
+                    f'jawab langsung, jujur, tidak kaku.\n\n'
+                    f'Info produk:\n{produk_info}\n\n'
+                    f'Info reseller: reseller mendapat harga khusus (lebih murah), '
+                    f'diskon makin besar sesuai volume, support materi promosi, MOQ fleksibel.\n\n'
+                    f'Pertanyaan calon reseller: "{text}"\n\n'
+                    f'Instruksi: Jawab pertanyaan di atas sebagai Dara. '
+                    f'JANGAN tambahkan footer atau opsi di akhir — itu sudah dihandle sistem.'
+                )
+                generation_config = genai.types.GenerationConfig(temperature=0.8, max_output_tokens=350)
+                response = ai_model.generate_content(prompt, generation_config=generation_config)
+                reply_text = response.text.strip() if (response and response.text) else ''
+                if reply_text:
+                    send_wa(sender, reply_text + _footer)
+                    replied = True
+            except Exception as e:
+                log.error(f'Reseller AI error: {e}')
+
+        if not replied:
+            send_wa(sender,
+                f'Pertanyaan kak sudah Dara catat ya 😊\n\n'
+                f'Untuk jawaban paling lengkap dan cepat, langsung tanya ke owner aja kak!'
+                + _footer
+            )
+
+
 # ─── MAIN HANDLER ─────────────────────────────────────────────────
 KEYWORD_RESET = {
     '0', 'menu', 'mulai', 'start', 'halo', 'hai', 'hi', 'hello',
@@ -1335,6 +1513,14 @@ def handle_message(sender, text, pushname=''):
     # ── AI CS ──
     if state == 'ai_cs':
         handle_ai_cs(sender, text_raw)
+        return
+
+    # ── Reseller follow-up ──
+    if state == 'reseller_follow':
+        handle_reseller_follow(sender, session, text_raw)
+        return
+    if state == 'reseller_detail':
+        handle_reseller_detail(sender, session, text_raw)
         return
 
     # ── Admin state — perintah / ──
